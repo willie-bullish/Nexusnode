@@ -4,7 +4,7 @@ set -e
 # === Basic Configuration ===
 BASE_CONTAINER_NAME="nexus-node"
 IMAGE_NAME="nexus-node:latest"
-LOG_DIR="/app_logs"
+LOG_DIR="/root/nexus_logs"
 
 # === Terminal Colors ===
 GREEN='\033[0;32m'
@@ -31,6 +31,8 @@ function check_docker() {
         add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
         apt update
         apt install -y docker-ce
+        systemctl enable docker
+        systemctl start docker
     fi
 }
 
@@ -40,6 +42,8 @@ function check_cron() {
         echo -e "${YELLOW}Cron is not available. Installing cron...${RESET}"
         apt update
         apt install -y cron
+        systemctl enable cron
+        systemctl start cron
     fi
 }
 
@@ -52,7 +56,7 @@ function build_image() {
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PROVER_ID_FILE=/app/.nexus/node-id
+ENV PROVER_ID_FILE=/root/.nexus/node-id
 
 RUN apt-get update && apt-get install -y \\
     curl \\
@@ -60,9 +64,8 @@ RUN apt-get update && apt-get install -y \\
     bash \\
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app
 RUN curl -sSL https://cli.nexus.xyz/ | NONINTERACTIVE=1 sh \\
-    && ln -sf /app/.nexus/bin/nexus-network /usr/local/bin/nexus-network
+    && ln -sf /root/.nexus/bin/nexus-network /usr/local/bin/nexus-network
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
@@ -73,23 +76,23 @@ EOF
     cat > entrypoint.sh <<EOF
 #!/bin/bash
 set -e
-PROVER_ID_FILE="/app/.nexus/node-id"
+PROVER_ID_FILE="/root/.nexus/node-id"
 if [ -z "\$NODE_ID" ]; then
     echo "NODE_ID is not set"
     exit 1
 fi
 echo "\$NODE_ID" > "\$PROVER_ID_FILE"
 screen -S nexus -X quit >/dev/null 2>&1 || true
-screen -dmS nexus bash -c "nexus-network start --node-id \$NODE_ID &>> /app/nexus.log"
+screen -dmS nexus bash -c "nexus-network start --node-id \$NODE_ID &>> /root/nexus.log"
 sleep 3
 if screen -list | grep -q "nexus"; then
     echo "Node is running in the background"
 else
     echo "Failed to start the node"
-    cat /app/nexus.log
+    cat /root/nexus.log
     exit 1
 fi
-tail -f /app/nexus.log
+tail -f /root/nexus.log
 EOF
 
     docker build -t "$IMAGE_NAME" .
@@ -108,12 +111,7 @@ function run_container() {
     touch "$log_file"
     chmod 644 "$log_file"
 
-    docker run -d \
-      --restart unless-stopped \
-      --name "$container_name" \
-      -v "$log_file":/app/nexus.log \
-      -e NODE_ID="$node_id" \
-      "$IMAGE_NAME"
+    docker run -d --name "$container_name" -v "$log_file":/root/nexus.log -e NODE_ID="$node_id" "$IMAGE_NAME"
 
     check_cron
     echo "0 0 * * * rm -f $log_file" > "/etc/cron.d/nexus-log-cleanup-${node_id}"
